@@ -18,11 +18,10 @@ all other mpv shortcuts should work as inteded.
 ## Installation / requirements
 
 1. clone this repo
-2. create a virtualenv `python -m venv venv`
-3. activate venv `. venv/bin/activate`
-4. install dependencies `pip install -r requirements.txt`
-5. copy `config.py.example` to `config.py`, `cp config.py.example config.py`
-6. Setup your handy key in the `config.py` file.
+2. install dependencies `pip install -r requirements.txt`
+    - If You encounter an issue with pillow you can change the version installed to be a compatible version for your python version (https://pillow.readthedocs.io/en/stable/installation.html)
+3. copy `config.py.example` to `config.py`, `cp config.py.example config.py`
+4. Setup your handy key in the `config.py` file.
 ```python
 # ...
 

@@ -1,24 +1,16 @@
 #!/usr/bin/python3
 
-from mpv import ShutdownError
-from PIL import Image, ImageDraw, ImageFont
-from time import sleep, time_ns
-import argparse
-import json
-import os
-from os.path import exists
-import io
-import sys
+import argparse, json, os, requests, sys, mpv, config, io
 from datetime import datetime
+from os.path import exists
+from time import sleep, time_ns
+from mpv import MPV, ShutdownError
+from PIL import Image, ImageDraw, ImageFont
 
-import mpv
-import requests
-
-import config
 
 API_SECRET=config.API_SECRET
 API_ENDPOINT="https://www.handyfeeling.com/api/handy/v2/"
-
+HEADERS = {'X-Connection-Key': API_SECRET}
 TIMEOUT = 10 * 1000 # 10 seconds
 
 time_sync_initial_offset = 0
@@ -26,18 +18,58 @@ time_sync_aggregate_offset = 0
 time_sync_average_offset = 0
 time_syncs = 0
 
-
-HEADERS = {
-    'X-Connection-Key': API_SECRET
-}
-
 parser = argparse.ArgumentParser(description='Handy MPV sync Utility')
 parser.add_argument('file', metavar='file', type=str,
                    help='The file to play')
 parser.add_argument("--double", action="store_true", help='enable 2x speed conversion')
 
-# this code is actually really dumb, should refactor, an intern probably
-# did this. I'm just copying the JS code from the site.
+def main():
+    print('Getting Handy Status')
+    r = requests.get(f'{API_ENDPOINT}status', headers=HEADERS)
+    data = json.loads(r.text)
+
+    if not data['mode']:
+        print('Couldn\'t Sync with Handy, Exiting.')
+        exit()
+
+    if data['mode'] != 1:
+        r = requests.put(f'{API_ENDPOINT}/mode', json={"mode": 1}, headers=HEADERS)
+        print(r.text)
+
+    print('Handy connected, Uploading script!')
+
+    args = parser.parse_args()
+    script = find_script(args.file)
+    if args.double:
+        upload_script(script_2x(script), True)
+
+    saved_time = get_saved_time()
+
+    if  time_ns() - saved_time['last_saved'] < 3600000000000:
+        time_sync_average_offset = saved_time['time_sync_average_offset']
+        time_sync_initial_offset = saved_time['time_sync_initial_offset']
+    else :
+        update_server_time()
+        save_server_time()
+    global player
+    player = mpv.MPV(input_default_bindings=True, input_vo_keyboard=True, osc=True)
+    player.play(args.file)
+
+    sync = 0
+
+    player.register_key_binding("up", my_up_binding)
+    player.register_key_binding("q", my_q_binding)
+    player.register_key_binding("down", my_down_binding)
+    player.observe_property('pause', video_pause_unpause)
+
+    player.register_event_callback(on_event)
+
+    try:
+        player.wait_for_playback()
+    except ShutdownError as e:
+        sync_play(0, 'false')
+        del player
+        exit()
 
 def save_server_time():
     if not exists(config.TIME_SYNC_FILE):
@@ -77,7 +109,6 @@ def update_server_time():
     rtd = time_now - send_time
     estimated_server_time_now = int(server_time + rtd / 2)
 
-    # this part here, real dumb.
     if time_syncs == 0:
         time_sync_initial_offset = estimated_server_time_now - time_now
         print(f'initial offset {time_sync_initial_offset} ms')
@@ -92,7 +123,6 @@ def update_server_time():
     else:
         print(f'we in sync, Average offset is: {int(time_sync_average_offset)} ms')
         return
-
 
 def find_script(video_path):
     video_name = video_path.replace('.' + str.split(video_path, '.')[-1:][0], '')
@@ -138,49 +168,6 @@ def upload_script(script, double=False):
     r = requests.put(f'{API_ENDPOINT}hssp/setup', json={'url': data['url']}, headers=HEADERS)
     data = json.loads(r.text)
 
-print('Getting Handy Status')
-r = requests.get(f'{API_ENDPOINT}status', headers=HEADERS)
-data = json.loads(r.text)
-
-if not data['mode']:
-    print('Couldn\'t Sync with Handy, Exiting.')
-    exit()
-
-if data['mode'] != 1:
-    r = requests.put(f'{API_ENDPOINT}/mode', json={"mode": 1}, headers=HEADERS)
-    print(r.text)
-
-print('Handy connected, Uploading script!')
-
-args = parser.parse_args()
-print(args)
-script = find_script(args.file)
-if args.double:
-    upload_script(script_2x(script), True)
-else:
-    upload_script(script)
-
-
-saved_time = get_saved_time()
-
-if  time_ns() - saved_time['last_saved'] < 3600000000000:
-    time_sync_average_offset = saved_time['time_sync_average_offset']
-    time_sync_initial_offset = saved_time['time_sync_initial_offset']
-else :
-    update_server_time()
-    save_server_time()
-
-player = mpv.MPV(input_default_bindings=True, input_vo_keyboard=True, osc=True)
-player.play(args.file)
-# font = ImageFont.truetype('DejaVuSans.ttf', 40)
-
-
-# overlay = player.create_image_overlay()
-# img = Image.new('RGBA', (400, 150),  (255, 255, 255, 0))
-# d = ImageDraw.Draw(img)
-
-sync = 0
-
 def sync_play(time=0, play='true'):
     payload = {
         'estimatedServerTime': get_server_time(),
@@ -194,14 +181,12 @@ def sync_play(time=0, play='true'):
     r = requests.put(f'{API_ENDPOINT}hssp/play', json=payload, headers=HEADERS)
     print(r.text)
 
-# @player.on_key_press('up')
 def my_up_binding(key_state, key_name, key_char):
     value = player._get_property('playback-time')
     time_ms = int(value * 1000)
     print(time_ms)
     sync_play(time_ms, 'false')
 
-# @player.on_key_press('q')
 def my_q_binding(key_state, key_name, key_char):
     global player
     sync_play(0, 'false')
@@ -209,19 +194,12 @@ def my_q_binding(key_state, key_name, key_char):
     del player
     os._exit(-1)
 
-# @player.on_key_press('down')
 def my_down_binding(key_state, key_name, key_char):
     value = player._get_property('playback-time')
     time_ms = int(value * 1000)
     print(time_ms)
     sync_play(time_ms, 'true')
 
-
-player.register_key_binding("up", my_up_binding)
-player.register_key_binding("q", my_q_binding)
-player.register_key_binding("down", my_down_binding)
-
-# @player.event_callback('playback-restart')
 def file_restart(event):
     value = player._get_property('playback-time')
     time_ms = int(value * 1000)
@@ -229,13 +207,11 @@ def file_restart(event):
     sync_play(time_ms)
     print(f'Now playing at {time_ms}s')
 
-# @player.event_callback('shutdown')
 def callback_shutdown(event):
     sync_play(0, 'false')
     player.command("quit")
     sys.exit()
 
-#@player.event_callback('pause')
 def video_pause(event):
     sync_play(0, 'false')
 
@@ -249,14 +225,10 @@ def video_pause_unpause(property_name, new_value):
             time_ms = int(value * 1000)
             sync_play(time_ms, 'true')
 
-player.observe_property('pause', video_pause_unpause)
-
-#@player.event_callback('unpause')
 def video_unpause(event):
     value = player._get_property('playback-time')
     time_ms = int(value * 1000)
     sync_play(time_ms, 'true')
-
 
 def on_event(event):
     e = event.as_dict(decoder=mpv.lazy_decoder)["event"]
@@ -265,17 +237,5 @@ def on_event(event):
             file_restart(event)
         case "shutdown":
             callback_shutdown(event)
-        # case "pause":
-        #     video_pause(event)
-        # case "unpause":
-        #     video_unpause(event)
 
-player.register_event_callback(on_event)
-
-
-try:
-    player.wait_for_playback()
-except ShutdownError as e:
-    sync_play(0, 'false')
-    del player
-    exit()
+main()
